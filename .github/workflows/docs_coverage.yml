@@ -2,7 +2,9 @@ name: Docs Coverage
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+    - current
+    - main
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
