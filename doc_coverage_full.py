@@ -11,15 +11,18 @@ TARGET_TAGS = {"node", "leafNode", "tagNode"}
 # include строка вида: #include <include/xxx.xml.i>
 INCLUDE_RE = re.compile(r'^\s*#include\s*<([^>]+)>\s*$', re.MULTILINE)
 
-def normalize_text(s):
+
+def normalize_text(s: str) -> str:
     # Убираем невидимые NBSP, которые иногда ломают Python/XML
     return s.replace("\u00A0", " ")
 
-def read_file(path):
+
+def read_file(path: str) -> str:
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         return normalize_text(f.read())
 
-def resolve_include_path(repo_root, current_file, include_ref):
+
+def resolve_include_path(repo_root: str, current_file: str, include_ref: str) -> str:
     """
     include_ref приходит как 'include/vrrp/garp.xml.i' (без угловых скобок)
     Обычно такие файлы лежат в interface-definitions/include/...
@@ -39,11 +42,12 @@ def resolve_include_path(repo_root, current_file, include_ref):
     if hits:
         return hits[0]
 
-    raise FileNotFoundError("Include not found: <{}> referenced from {}".format(include_ref, current_file))
+    raise FileNotFoundError(f"Include not found: <{include_ref}> referenced from {current_file}")
 
-def expand_includes(repo_root, file_path, visited, depth=0, max_depth=50):
+
+def expand_includes(repo_root: str, file_path: str, visited: set, depth: int = 0, max_depth: int = 50) -> str:
     if depth > max_depth:
-        raise RecursionError("Max include depth exceeded at {}".format(file_path))
+        raise RecursionError(f"Max include depth exceeded at {file_path}")
 
     norm = os.path.normpath(file_path)
     if norm in visited:
@@ -66,7 +70,8 @@ def expand_includes(repo_root, file_path, visited, depth=0, max_depth=50):
 
     return expanded
 
-def parse_xml_from_file(repo_root, file_path):
+
+def parse_xml_from_file(repo_root: str, file_path: str) -> ET.Element:
     visited = set()
     expanded_body = expand_includes(repo_root, file_path, visited)
 
@@ -74,8 +79,14 @@ def parse_xml_from_file(repo_root, file_path):
     xml_text = '<?xml version="1.0"?>\n' + expanded_body.strip() + "\n"
     return ET.fromstring(xml_text)
 
-def has_child(props, tag):
+
+def has_child(props: ET.Element, tag: str) -> bool:
     return props is not None and props.find(tag) is not None
+
+
+def pct(x: int, y: int) -> float:
+    return round((float(x) / float(y) * 100.0), 2) if y else 0.0
+
 
 def main():
     repo_root = os.path.abspath(os.getcwd())
@@ -85,7 +96,7 @@ def main():
     with_help = 0
     with_value_or_completion = 0
     with_constraint = 0
-    with_doc_tag = 0  # на будущее
+    with_doc_tag = 0
 
     parsed_files = 0
     failed_files = 0
@@ -117,11 +128,11 @@ def main():
                 if has_child(props, "documentation"):
                     with_doc_tag += 1
 
-    def pct(x, y):
-        return round((float(x) / float(y) * 100.0), 2) if y else 0.0
-
+    # ВАЖНО ДЛЯ BIGQUERY:
+    # timestamp_utc -> TIMESTAMP: используем формат с 'Z'
+    # failures_sample -> STRING: сериализуем массив в строку JSON
     result = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "files_total": len(files),
         "files_parsed": parsed_files,
         "files_failed": failed_files,
@@ -134,10 +145,12 @@ def main():
         "constraint_coverage_pct": pct(with_constraint, total_entities),
         "documentation_entities": with_doc_tag,
         "documentation_coverage_pct": pct(with_doc_tag, total_entities),
-        "failures_sample": failures[:10],
+        "failures_sample": json.dumps(failures[:10], ensure_ascii=False),
     }
 
-    print(json.dumps(result, ensure_ascii=False))
+    # Одна строка JSON (newline-delimited friendly)
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+
 
 if __name__ == "__main__":
     main()
