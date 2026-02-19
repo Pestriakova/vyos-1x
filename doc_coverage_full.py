@@ -137,7 +137,8 @@ def main():
         "failures_sample": failures[:10],
     }
 
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(result, ensure_ascii=False))
 
 if __name__ == "__main__":
     main()
+print(json.dumps(result, ensure_ascii=False))\
