@@ -141,4 +141,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-print(json.dumps(result, ensure_ascii=False))\
