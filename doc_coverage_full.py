@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
+from google.cloud import bigquery  # <-- NEW
+
 # Какие элементы считаем "CLI сущностями"
 TARGET_TAGS = {"node", "leafNode", "tagNode"}
 
@@ -13,7 +15,6 @@ INCLUDE_RE = re.compile(r'^\s*#include\s*<([^>]+)>\s*$', re.MULTILINE)
 
 
 def normalize_text(s: str) -> str:
-    # Убираем невидимые NBSP, которые иногда ломают Python/XML
     return s.replace("\u00A0", " ")
 
 
@@ -23,21 +24,14 @@ def read_file(path: str) -> str:
 
 
 def resolve_include_path(repo_root: str, current_file: str, include_ref: str) -> str:
-    """
-    include_ref приходит как 'include/vrrp/garp.xml.i' (без угловых скобок)
-    Обычно такие файлы лежат в interface-definitions/include/...
-    """
-    # 1) стандартно: interface-definitions/<include_ref>
     p1 = os.path.join(repo_root, "interface-definitions", include_ref)
     if os.path.exists(p1):
         return p1
 
-    # 2) на всякий: относительно текущего файла
     p2 = os.path.join(os.path.dirname(current_file), include_ref)
     if os.path.exists(p2):
         return p2
 
-    # 3) fallback: поиск по repo_root (дороже, но спасает)
     hits = glob.glob(os.path.join(repo_root, "**", include_ref), recursive=True)
     if hits:
         return hits[0]
@@ -51,7 +45,6 @@ def expand_includes(repo_root: str, file_path: str, visited: set, depth: int = 0
 
     norm = os.path.normpath(file_path)
     if norm in visited:
-        # предотвращаем циклы include
         return ""
 
     visited.add(norm)
@@ -62,20 +55,14 @@ def expand_includes(repo_root: str, file_path: str, visited: set, depth: int = 0
         inc_path = resolve_include_path(repo_root, file_path, include_ref)
         return expand_includes(repo_root, inc_path, visited, depth + 1, max_depth)
 
-    # Разворачиваем все include
     expanded = INCLUDE_RE.sub(repl, content)
-
-    # В include иногда бывает xml header — удалим, чтобы не было "двух <?xml"
-    expanded = re.sub(r'<\?xml[^>]*\?>\s*', '', expanded)
-
+    expanded = re.sub(r'<\?xml[^>]*\?>\s*', "", expanded)
     return expanded
 
 
 def parse_xml_from_file(repo_root: str, file_path: str) -> ET.Element:
     visited = set()
     expanded_body = expand_includes(repo_root, file_path, visited)
-
-    # Делаем 1 валидный XML документ
     xml_text = '<?xml version="1.0"?>\n' + expanded_body.strip() + "\n"
     return ET.fromstring(xml_text)
 
@@ -86,6 +73,26 @@ def has_child(props: ET.Element, tag: str) -> bool:
 
 def pct(x: int, y: int) -> float:
     return round((float(x) / float(y) * 100.0), 2) if y else 0.0
+
+
+def write_to_bigquery(row: dict) -> None:
+    """
+    Вставляет 1 строку в BigQuery.
+    Требования:
+    - В workflow должен быть настроен GOOGLE_APPLICATION_CREDENTIALS на json-key файл
+    - В BQ уже создана таблица vyos-billing-data.ci_metrics.docs_coverage
+    """
+    project_id = "vyos-billing-data"
+    table_id = "vyos-billing-data.ci_metrics.docs_coverage"
+
+    client = bigquery.Client(project=project_id)
+
+    errors = client.insert_rows_json(table_id, [row])
+    if errors:
+        # ВАЖНО: если прав не хватает / схема не совпала — ошибки будут тут
+        raise RuntimeError(f"BigQuery insert failed: {errors}")
+
+    print("✅ Inserted 1 row into BigQuery:", table_id)
 
 
 def main():
@@ -128,10 +135,8 @@ def main():
                 if has_child(props, "documentation"):
                     with_doc_tag += 1
 
-    # ВАЖНО ДЛЯ BIGQUERY:
-    # timestamp_utc -> TIMESTAMP: используем формат с 'Z'
-    # failures_sample -> STRING: сериализуем массив в строку JSON
-    result = {
+    row = {
+        # BigQuery TIMESTAMP: нормально принимает строку ISO с Z
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "files_total": len(files),
         "files_parsed": parsed_files,
@@ -145,11 +150,17 @@ def main():
         "constraint_coverage_pct": pct(with_constraint, total_entities),
         "documentation_entities": with_doc_tag,
         "documentation_coverage_pct": pct(with_doc_tag, total_entities),
+        # failures_sample у тебя STRING — значит кладём JSON-строкой
         "failures_sample": json.dumps(failures[:10], ensure_ascii=False),
+        # если поле есть в таблице (на скрине оно есть) — кладём:
+        "value_or_completion_coverage_pct": pct(with_value_or_completion, total_entities),
     }
 
-    # Одна строка JSON (newline-delimited friendly)
-    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    # 1) как раньше — печатаем в лог
+    print(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+
+    # 2) NEW — пишем в BigQuery
+    write_to_bigquery(row)
 
 
 if __name__ == "__main__":
